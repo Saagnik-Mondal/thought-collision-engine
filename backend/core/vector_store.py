@@ -1,58 +1,53 @@
 <![CDATA["""
-Thought Collision Engine — ChromaDB Vector Store
-
+Thought Collision Engine — Qdrant Vector Store
 Manages concept embeddings for semantic similarity and distance calculations.
+Replaces ChromaDB for improved scalability and async support.
 """
-
 from __future__ import annotations
-
 from typing import Optional
-
-import chromadb
-from chromadb.config import Settings as ChromaSettings
 from loguru import logger
-
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.http.models import Distance, VectorParams, PointStruct
 from config import settings
 
-
 class VectorStore:
-    """ChromaDB vector store for concept embeddings."""
+    """Qdrant vector store for concept embeddings."""
 
     def __init__(self):
-        self._client: Optional[chromadb.ClientAPI] = None
-        self._collection = None
+        self._client: Optional[AsyncQdrantClient] = None
+        self._collection_name = settings.qdrant_collection
+        self._vector_size = 384 # all-MiniLM-L6-v2 size
 
-    def connect(self):
-        """Connect to ChromaDB."""
+    async def connect(self):
+        """Connect to Qdrant and initialize collection."""
         try:
-            self._client = chromadb.HttpClient(
-                host=settings.chroma_host,
-                port=settings.chroma_port,
-                settings=ChromaSettings(anonymized_telemetry=False),
-            )
-            self._collection = self._client.get_or_create_collection(
-                name=settings.chroma_collection,
-                metadata={"hnsw:space": "cosine"},
-            )
-            logger.info(
-                "ChromaDB connected — collection '{}' ({} items)",
-                settings.chroma_collection,
-                self._collection.count(),
-            )
+            self._client = AsyncQdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
+            
+            # Check if collection exists, create if not
+            collections = await self._client.get_collections()
+            exists = any(c.name == self._collection_name for c in collections.collections)
+            
+            if not exists:
+                await self._client.create_collection(
+                    collection_name=self._collection_name,
+                    vectors_config=VectorParams(size=self._vector_size, distance=Distance.COSINE),
+                )
+                logger.info(f"Created Qdrant collection '{self._collection_name}'.")
+            else:
+                count = (await self._client.get_collection(self._collection_name)).vectors_count
+                logger.info(f"Qdrant connected — collection '{self._collection_name}' ({count} items)")
+                
         except Exception as e:
-            logger.warning("ChromaDB connection failed, using in-memory fallback: {}", e)
-            self._client = chromadb.Client()
-            self._collection = self._client.get_or_create_collection(
-                name=settings.chroma_collection,
-                metadata={"hnsw:space": "cosine"},
-            )
+            logger.error(f"Qdrant connection failed: {e}")
+            self._client = None
 
-    def is_healthy(self) -> bool:
-        """Check if ChromaDB is reachable."""
+    async def is_healthy(self) -> bool:
+        """Check if Qdrant is reachable."""
         if not self._client:
             return False
         try:
-            self._client.heartbeat()
+            # simple ping
+            await self._client.get_collections()
             return True
         except Exception:
             return False
@@ -65,92 +60,76 @@ class VectorStore:
         domain: str = "",
         metadata: dict = None,
     ):
-        """Store a concept embedding."""
-        if not self._collection:
+        """Store a concept embedding (Synchronous wrapper for Graph Builder)."""
+        import asyncio
+        if not self._client:
             return
-
+            
         meta = {"name": name, "domain": domain}
         if metadata:
-            meta.update({k: str(v) for k, v in metadata.items()})
+            meta.update(metadata)
+            
+        # We need a proper UUID format or int for Qdrant IDs, but Qdrant accepts UUID strings.
+        # If concept_id is just a hash string, Qdrant will fail. 
+        # For Thought Collision, concept_id is usually a UUID. We will hash it to int to be safe.
+        point_id = hash(concept_id) & ((1<<63)-1) 
 
-        self._collection.upsert(
-            ids=[concept_id],
-            embeddings=[embedding],
-            metadatas=[meta],
-            documents=[name],
-        )
+        point = PointStruct(id=point_id, vector=embedding, payload=meta)
+        
+        # Fire and forget or block if in async context
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._client.upsert(
+                collection_name=self._collection_name,
+                points=[point]
+            ))
+        except RuntimeError:
+            asyncio.run(self._client.upsert(
+                collection_name=self._collection_name,
+                points=[point]
+            ))
 
-    def query_similar(
-        self,
-        embedding: list[float],
-        n_results: int = 10,
-        where: dict = None,
-    ) -> list[dict]:
-        """Find concepts with similar embeddings."""
-        if not self._collection:
-            return []
-
-        kwargs = {
-            "query_embeddings": [embedding],
-            "n_results": n_results,
-        }
-        if where:
-            kwargs["where"] = where
-
-        results = self._collection.query(**kwargs)
-
-        items = []
-        if results and results["ids"]:
-            for i, concept_id in enumerate(results["ids"][0]):
-                items.append({
-                    "id": concept_id,
-                    "distance": results["distances"][0][i] if results["distances"] else 0,
-                    "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
-                })
-        return items
-
-    def get_embedding(self, concept_id: str) -> Optional[list[float]]:
+    async def get_embedding(self, concept_id: str) -> Optional[list[float]]:
         """Get the embedding for a concept."""
-        if not self._collection:
+        if not self._client:
             return None
-
-        result = self._collection.get(ids=[concept_id], include=["embeddings"])
-        if result and result["embeddings"]:
-            return result["embeddings"][0]
+            
+        point_id = hash(concept_id) & ((1<<63)-1)
+        points = await self._client.retrieve(
+            collection_name=self._collection_name,
+            ids=[point_id],
+            with_vectors=True
+        )
+        if points and points[0].vector:
+            return points[0].vector
         return None
 
-    def get_all_embeddings(self) -> dict[str, list[float]]:
-        """Get all embeddings keyed by concept ID."""
-        if not self._collection:
-            return {}
+    def search(self, embedding: list[float], top_k: int = 10) -> list[dict]:
+        """Synchronous wrapper to find concepts with similar embeddings."""
+        import asyncio
+        if not self._client:
+            return []
 
-        result = self._collection.get(include=["embeddings"])
-        if result and result["ids"]:
-            return dict(zip(result["ids"], result["embeddings"]))
-        return {}
+        async def _search():
+            hits = await self._client.search(
+                collection_name=self._collection_name,
+                query_vector=embedding,
+                limit=top_k,
+            )
+            items = []
+            for hit in hits:
+                items.append({
+                    "id": str(hit.id), # Not perfect translation from hash but payload contains name
+                    "score": hit.score,
+                    "metadata": hit.payload
+                })
+            return items
+            
+        try:
+            loop = asyncio.get_running_loop()
+            return loop.run_until_complete(_search())
+        except RuntimeError:
+            return asyncio.run(_search())
 
-    def compute_distance(self, id_a: str, id_b: str) -> float:
-        """Compute cosine distance between two concepts."""
-        emb_a = self.get_embedding(id_a)
-        emb_b = self.get_embedding(id_b)
-
-        if not emb_a or not emb_b:
-            return 1.0  # Max distance if missing
-
-        # Cosine distance = 1 - cosine_similarity
-        import numpy as np
-        a = np.array(emb_a)
-        b = np.array(emb_b)
-        cos_sim = np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-10)
-        return float(1.0 - cos_sim)
-
-    def count(self) -> int:
-        """Get the number of stored embeddings."""
-        if not self._collection:
-            return 0
-        return self._collection.count()
-
-
-# Singleton instance
 vector_store = VectorStore()
 ]]>

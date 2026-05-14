@@ -1,32 +1,43 @@
 <![CDATA["""
 arXiv Connector — Fetch papers from arXiv API.
 """
-import asyncio
 from loguru import logger
+from pipeline.ingestion.base import BaseConnector
 
-class ArxivConnector:
+class ArxivConnector(BaseConnector):
     name = "arxiv"
+    description = "Fetches abstracts and metadata from arXiv"
+    supported_types = ["arxiv"]
 
-    async def fetch_paper(self, arxiv_id: str) -> dict:
-        """Fetch an arXiv paper by ID."""
+    async def ingest(self, source: str, **kwargs) -> str:
         try:
             import arxiv
             client = arxiv.Client()
-            search = arxiv.Search(id_list=[arxiv_id])
+            search = arxiv.Search(id_list=[source])
             results = list(client.results(search))
             if not results:
-                raise ValueError(f"No paper found for ID: {arxiv_id}")
+                return ""
+            return results[0].summary
+        except Exception as e:
+            logger.error("arXiv ingestion failed: {}", e)
+            return ""
+
+    async def extract_metadata(self, source: str, **kwargs) -> dict:
+        try:
+            import arxiv
+            client = arxiv.Client()
+            search = arxiv.Search(id_list=[source])
+            results = list(client.results(search))
+            if not results:
+                return {}
             paper = results[0]
-            logger.info("📄 Fetched arXiv paper: {}", paper.title)
             return {
                 "title": paper.title,
-                "abstract": paper.summary,
                 "authors": [str(a) for a in paper.authors],
                 "url": str(paper.entry_id),
                 "categories": paper.categories,
                 "published": str(paper.published),
             }
-        except ImportError:
-            logger.warning("arxiv package not installed")
-            return {"title": f"arXiv:{arxiv_id}", "abstract": "", "url": f"https://arxiv.org/abs/{arxiv_id}"}
+        except Exception:
+            return {}
 ]]>

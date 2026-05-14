@@ -7,7 +7,6 @@ Loads settings from environment variables with sensible defaults.
 from pydantic_settings import BaseSettings
 from pydantic import Field
 
-
 class Settings(BaseSettings):
     """Application configuration loaded from environment variables."""
 
@@ -32,10 +31,10 @@ class Settings(BaseSettings):
     neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")
     neo4j_password: str = Field(default="tce_neo4j_password", alias="NEO4J_PASSWORD")
 
-    # ChromaDB
-    chroma_host: str = Field(default="localhost", alias="CHROMA_HOST")
-    chroma_port: int = Field(default=8001, alias="CHROMA_PORT")
-    chroma_collection: str = Field(default="concept_embeddings", alias="CHROMA_COLLECTION")
+    # Qdrant Vector Store
+    qdrant_host: str = Field(default="localhost", alias="QDRANT_HOST")
+    qdrant_port: int = Field(default=6333, alias="QDRANT_PORT")
+    qdrant_collection: str = Field(default="concept_embeddings", alias="QDRANT_COLLECTION")
 
     # Embeddings
     embedding_model: str = Field(default="all-MiniLM-L6-v2", alias="EMBEDDING_MODEL")
@@ -59,7 +58,6 @@ class Settings(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         populate_by_name = True
-
 
 settings = Settings()
 ]]>

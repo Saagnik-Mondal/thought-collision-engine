@@ -13,8 +13,8 @@ alembic==1.14.1
 # Neo4j
 neo4j==5.27.0
 
-# ChromaDB
-chromadb==0.5.23
+# Vector Store
+qdrant-client>=1.7.0
 
 # NLP & ML
 spacy==3.8.4

@@ -36,15 +36,13 @@ services:
       timeout: 5s
       retries: 5
 
-  chromadb:
-    image: chromadb/chroma:latest
-    container_name: tce-chromadb
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: tce-qdrant
     ports:
-      - "8001:8000"
+      - "6333:6333"
     volumes:
-      - chroma_data:/chroma/chroma
-    environment:
-      ANONYMIZED_TELEMETRY: "false"
+      - qdrant_data:/qdrant/storage
 
   backend:
     build:
@@ -62,14 +60,14 @@ services:
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USER: neo4j
       NEO4J_PASSWORD: tce_neo4j_password
-      CHROMA_HOST: chromadb
-      CHROMA_PORT: 8000
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
     depends_on:
       neo4j:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      chromadb:
+      qdrant:
         condition: service_started
     volumes:
       - ./backend:/app
@@ -93,5 +91,4 @@ volumes:
   neo4j_data:
   neo4j_logs:
   postgres_data:
-  chroma_data:
-]]>
+  qdrant_data:]]>

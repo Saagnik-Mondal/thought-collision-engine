@@ -1,26 +1,48 @@
-<![CDATA["""Tests for the novelty scoring system."""
-from algorithms.novelty.scorer import NoveltyScorer
+<![CDATA["""
+Tests for Novelty Scoring Components
+"""
+import pytest
+from algorithms.novelty.components.concept_diversity import ConceptDiversityComponent
+from algorithms.novelty.config import validate_weights, DEFAULT_WEIGHTS
 
-def test_novelty_scorer(sample_collision):
-    scorer = NoveltyScorer()
-    score = scorer.score(sample_collision)
-    assert 0 <= score <= 100
-    assert score > 30  # Cross-domain collisions should score well
+# Mock Neo4j Client for Diversity Testing
+class MockNeo4j:
+    async def execute_read(self, query, params):
+        if "ConceptDiversity" in self.__class__.__name__ or "domain" in query:
+            if params["id"] == "a":
+                return [{"domains": ["AI", "CS", "Math"]}]
+            if params["id"] == "b":
+                return [{"domains": ["Biology", "Chemistry", "CS"]}]
+        return []
 
-def test_novelty_breakdown(sample_collision):
-    scorer = NoveltyScorer()
-    breakdown = scorer.score_breakdown(sample_collision)
-    assert "semantic_distance" in breakdown
-    assert "rarity" in breakdown
-    assert "graph_separation" in breakdown
-    assert "citation_uniqueness" in breakdown
-    assert "concept_diversity" in breakdown
+@pytest.fixture
+def mock_neo4j():
+    return MockNeo4j()
 
-def test_same_domain_lower_score():
-    scorer = NoveltyScorer()
-    same_domain = {"domain_a": "biology", "domain_b": "biology",
-        "semantic_distance": 0.3, "graph_distance": 0.2, "bridge_score": 0.3}
-    cross_domain = {"domain_a": "biology", "domain_b": "computer_science",
-        "semantic_distance": 0.7, "graph_distance": 0.8, "bridge_score": 0.7}
-    assert scorer.score(cross_domain) > scorer.score(same_domain)
+def test_weight_validation():
+    # Should normalize
+    weights = {"a": 10, "b": 10}
+    norm = validate_weights(weights)
+    assert norm["a"] == 0.5
+    assert norm["b"] == 0.5
+    
+    # Empty should return default
+    assert validate_weights({}) == DEFAULT_WEIGHTS
+
+@pytest.mark.asyncio
+async def test_concept_diversity(mock_neo4j):
+    comp = ConceptDiversityComponent(mock_neo4j)
+    
+    # Neighborhood A: AI, CS, Math
+    # Neighborhood B: Biology, Chemistry, CS
+    # Intersection: CS (1)
+    # Union: AI, CS, Math, Biology, Chemistry (5)
+    # Jaccard Index = 1/5 = 0.2
+    # Jaccard Distance (Diversity Score) = 1 - 0.2 = 0.8
+    
+    score = await comp.score("a", "b")
+    assert score == 0.8
+    
+    explanation = comp.explain(score)
+    assert "partially overlapping" in explanation.lower() or "distinct" in explanation.lower()
 ]]>

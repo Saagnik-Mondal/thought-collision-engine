@@ -5,213 +5,118 @@ Endpoints for uploading and processing knowledge sources.
 """
 
 import uuid
+import asyncio
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, UploadFile, Form, HTTPException
+from fastapi import APIRouter, Depends, File, UploadFile, Form, HTTPException, BackgroundTasks
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
-from api.deps import get_db
+from api.deps import get_db, get_current_user
 from core.database import SourceRecord
 from core.models import Source, SourceType, StatsResponse
-from pipeline.ingestion.pdf_connector import PDFConnector
-from pipeline.ingestion.url_connector import URLConnector
-from pipeline.ingestion.text_connector import TextConnector
-from pipeline.ingestion.arxiv_connector import ArxivConnector
-from pipeline.ingestion.github_connector import GitHubConnector
+from pipeline.ingestion.queue import ingestion_queue
 
 router = APIRouter()
 
+# Start the queue worker on startup
+@router.on_event("startup")
+async def startup_event():
+    await ingestion_queue.start_worker()
 
-@router.post("/upload", response_model=Source)
+@router.on_event("shutdown")
+async def shutdown_event():
+    await ingestion_queue.stop_worker()
+
+
+@router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
-    title: str = Form(""),
+    title: str = Form(...),
     source_type: str = Form("pdf"),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db)
 ):
-    """Upload a document for ingestion."""
+    """Upload a document (PDF, TXT) and queue for processing."""
     source_id = str(uuid.uuid4())
-    file_content = await file.read()
-
-    # Determine connector
-    if source_type == "pdf":
-        connector = PDFConnector()
-        text = connector.extract_text(file_content)
-    else:
-        connector = TextConnector()
-        text = file_content.decode("utf-8", errors="ignore")
-
-    title = title or file.filename or "Untitled"
-    preview = text[:500] if text else ""
-
-    # Save to database
+    content = await file.read()
+    
     record = SourceRecord(
         id=source_id,
+        title=title,
         source_type=source_type,
-        title=title,
-        content_preview=preview,
-        status="ingested",
+        status="pending"
     )
     db.add(record)
     await db.commit()
+    await db.refresh(record)
 
-    logger.info("📥 Ingested document: {} ({})", title, source_type)
-
-    return Source(
-        id=source_id,
-        source_type=SourceType(source_type),
-        title=title,
-        content_preview=preview,
-        status="ingested",
-    )
+    await ingestion_queue.add_job(source_id, source_type, content, title)
+    return {"message": "Job queued", "source": record}
 
 
-@router.post("/url", response_model=Source)
-async def ingest_url(
-    url: str,
-    title: str = "",
-    db: AsyncSession = Depends(get_db),
-):
-    """Ingest content from a URL."""
+@router.post("/url")
+async def ingest_url(url: str, title: str = "Web Page", db: AsyncSession = Depends(get_db)):
+    """Queue a web page for ingestion."""
     source_id = str(uuid.uuid4())
-    connector = URLConnector()
-
-    try:
-        text = await connector.fetch_content(url)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to fetch URL: {e}")
-
-    title = title or url
-    preview = text[:500] if text else ""
-
     record = SourceRecord(
-        id=source_id,
-        source_type="url",
-        title=title,
-        url=url,
-        content_preview=preview,
-        status="ingested",
+        id=source_id, title=title, source_type="url", url=url, status="pending"
     )
     db.add(record)
     await db.commit()
+    await db.refresh(record)
 
-    logger.info("🌐 Ingested URL: {}", url)
-
-    return Source(
-        id=source_id,
-        source_type=SourceType.URL,
-        title=title,
-        url=url,
-        content_preview=preview,
-        status="ingested",
-    )
+    await ingestion_queue.add_job(source_id, "url", url, title)
+    return {"message": "Job queued", "source": record}
 
 
-@router.post("/arxiv", response_model=Source)
-async def ingest_arxiv(
-    arxiv_id: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """Ingest an arXiv paper by ID."""
+@router.post("/arxiv")
+async def ingest_arxiv(arxiv_id: str, db: AsyncSession = Depends(get_db)):
+    """Queue an arXiv paper for ingestion."""
     source_id = str(uuid.uuid4())
-    connector = ArxivConnector()
-
-    try:
-        paper = await connector.fetch_paper(arxiv_id)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to fetch arXiv paper: {e}")
-
     record = SourceRecord(
-        id=source_id,
-        source_type="arxiv",
-        title=paper["title"],
-        url=paper["url"],
-        content_preview=paper["abstract"][:500],
-        status="ingested",
+        id=source_id, title=f"arXiv: {arxiv_id}", source_type="arxiv", url=arxiv_id, status="pending"
     )
     db.add(record)
     await db.commit()
+    await db.refresh(record)
 
-    logger.info("📄 Ingested arXiv paper: {}", paper["title"])
-
-    return Source(
-        id=source_id,
-        source_type=SourceType.ARXIV,
-        title=paper["title"],
-        url=paper["url"],
-        content_preview=paper["abstract"][:500],
-        status="ingested",
-    )
+    await ingestion_queue.add_job(source_id, "arxiv", arxiv_id, f"arXiv: {arxiv_id}")
+    return {"message": "Job queued", "source": record}
 
 
-@router.post("/github", response_model=Source)
-async def ingest_github(
-    repo_url: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """Ingest a GitHub repository README."""
+@router.post("/github")
+async def ingest_github(repo_url: str, db: AsyncSession = Depends(get_db)):
+    """Queue a GitHub repository README for ingestion."""
     source_id = str(uuid.uuid4())
-    connector = GitHubConnector()
-
-    try:
-        repo_data = await connector.fetch_readme(repo_url)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to fetch GitHub repo: {e}")
-
     record = SourceRecord(
-        id=source_id,
-        source_type="github",
-        title=repo_data["title"],
-        url=repo_url,
-        content_preview=repo_data["content"][:500],
-        status="ingested",
+        id=source_id, title=repo_url, source_type="github", url=repo_url, status="pending"
     )
     db.add(record)
     await db.commit()
+    await db.refresh(record)
 
-    logger.info("🐙 Ingested GitHub repo: {}", repo_data["title"])
-
-    return Source(
-        id=source_id,
-        source_type=SourceType.GITHUB,
-        title=repo_data["title"],
-        url=repo_url,
-        content_preview=repo_data["content"][:500],
-        status="ingested",
-    )
+    await ingestion_queue.add_job(source_id, "github", repo_url, repo_url)
+    return {"message": "Job queued", "source": record}
 
 
-@router.post("/text", response_model=Source)
+@router.post("/text")
 async def ingest_text(
     content: str,
     title: str = "Text Input",
     db: AsyncSession = Depends(get_db),
 ):
-    """Ingest raw text content."""
+    """Queue raw text content for ingestion."""
     source_id = str(uuid.uuid4())
-    preview = content[:500]
-
     record = SourceRecord(
-        id=source_id,
-        source_type="text",
-        title=title,
-        content_preview=preview,
-        status="ingested",
+        id=source_id, title=title, source_type="text", status="pending"
     )
     db.add(record)
     await db.commit()
+    await db.refresh(record)
 
-    logger.info("📝 Ingested text: {}", title)
-
-    return Source(
-        id=source_id,
-        source_type=SourceType.TEXT,
-        title=title,
-        content_preview=preview,
-        status="ingested",
-    )
+    await ingestion_queue.add_job(source_id, "text", content, title)
+    return {"message": "Job queued", "source": record}
 
 
 @router.get("/sources", response_model=list[Source])

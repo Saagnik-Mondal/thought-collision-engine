@@ -1,43 +1,52 @@
 <![CDATA["""
-Community Detection — Louvain-based community detection.
+Graph Algorithms — Louvain Community Detection
+Groups tightly connected concepts into "communities" to enable Bridge Node discovery.
 """
 from loguru import logger
 from core.neo4j_client import Neo4jClient
 
 class CommunityDetection:
-    name = "community_detection"
-
-    async def detect(self, neo4j: Neo4jClient) -> dict:
-        """Detect communities using Louvain algorithm."""
+    async def run(self, neo4j: Neo4jClient) -> None:
+        """Execute Louvain Community Detection using Neo4j GDS or native fallback."""
+        logger.info("Executing Louvain Community Detection...")
         try:
             await neo4j.execute_write("""
-                CALL gds.graph.project('community_graph', 'Concept', {
-                    SEMANTIC: {orientation: 'UNDIRECTED'},
+            CALL gds.graph.project(
+                'louvain_graph',
+                'Concept',
+                {
+                    INFERRED_RELATION: {orientation: 'UNDIRECTED'},
                     CO_OCCURRENCE: {orientation: 'UNDIRECTED'}
-                })
+                }
+            )
             """)
-            result = await neo4j.execute_write("""
-                CALL gds.louvain.write('community_graph', {writeProperty: 'community_id'})
-                YIELD communityCount, modularity
-                RETURN communityCount, modularity
+            await neo4j.execute_write("""
+            CALL gds.louvain.write('louvain_graph', {
+                writeProperty: 'community_id'
+            })
             """)
-            await neo4j.execute_write("CALL gds.graph.drop('community_graph')")
-            info = result[0] if result else {}
-            logger.info("Detected {} communities (modularity: {})",
-                info.get("communityCount", 0), info.get("modularity", 0))
-            return info
-        except Exception as e:
-            logger.info("GDS not available, using label propagation fallback: {}", e)
-            return await self._simple_communities(neo4j)
-
-    async def _simple_communities(self, neo4j: Neo4jClient) -> dict:
-        """Assign communities based on domain grouping."""
-        await neo4j.execute_write("""
+            await neo4j.execute_write("CALL gds.graph.drop('louvain_graph')")
+            logger.info("Louvain completed via GDS.")
+        except Exception:
+            logger.warning("GDS not available. Using native Cypher fallback for Community Detection.")
+            # Native fallback: Weakly Connected Components approximation based on domains
+            query = """
             MATCH (c:Concept)
-            WITH c.domain AS domain, collect(c) AS nodes
-            UNWIND range(0, size(nodes)-1) AS idx
-            WITH nodes[idx] AS node, domain
-            SET node.community_id = CASE WHEN domain <> '' THEN abs(apoc.util.md5([domain])) % 100 ELSE -1 END
-        """)
-        return {"communityCount": 0, "modularity": 0, "method": "domain_fallback"}
+            SET c.community_id = coalesce(c.domain, 'unknown_community')
+            """
+            await neo4j.execute_write(query)
+            logger.info("Community Detection completed via domain mapping approximation.")
+
+    async def are_bridge_nodes(self, neo4j: Neo4jClient, node_a_id: str, node_b_id: str) -> bool:
+        """Check if two nodes belong to different communities."""
+        query = """
+        MATCH (a:Concept {id: $id_a}), (b:Concept {id: $id_b})
+        RETURN a.community_id AS comm_a, b.community_id AS comm_b
+        """
+        result = await neo4j.execute_read(query, {"id_a": node_a_id, "id_b": node_b_id})
+        if not result:
+            return False
+        row = result[0]
+        # Return True if they exist and are in different communities
+        return row.get("comm_a") != row.get("comm_b")
 ]]>

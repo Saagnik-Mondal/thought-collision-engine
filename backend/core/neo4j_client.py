@@ -44,10 +44,14 @@ class Neo4jClient:
             await session.run(
                 "CREATE INDEX concept_domain IF NOT EXISTS FOR (c:Concept) ON (c.domain)"
             )
-            # Index on concept id
+            # Index on domain name
             await session.run(
-                "CREATE CONSTRAINT concept_id IF NOT EXISTS FOR (c:Concept) REQUIRE c.id IS UNIQUE"
+                "CREATE INDEX domain_name IF NOT EXISTS FOR (d:Domain) ON (d.name)"
             )
+            # Global unique ID constraint across major labels
+            await session.run("CREATE CONSTRAINT source_id IF NOT EXISTS FOR (s:Source) REQUIRE s.id IS UNIQUE")
+            await session.run("CREATE CONSTRAINT entity_id IF NOT EXISTS FOR (e:Entity) REQUIRE e.id IS UNIQUE")
+            await session.run("CREATE CONSTRAINT concept_id IF NOT EXISTS FOR (c:Concept) REQUIRE c.id IS UNIQUE")
             logger.info("Neo4j indexes created/verified")
 
     async def close(self):
@@ -84,60 +88,73 @@ class Neo4jClient:
             records = await result.data()
             return records
 
-    async def create_concept_node(
-        self,
-        concept_id: str,
-        name: str,
-        node_type: str,
-        domain: str = "",
-        description: str = "",
-        metadata: dict = None,
-    ) -> dict:
-        """Create a concept node in the graph."""
+    async def create_concept_node(self, concept_id: str, name: str, domain: str = "", metadata: dict = None) -> dict:
+        """Create a Concept node."""
         query = """
         MERGE (c:Concept {id: $id})
-        SET c.name = $name,
-            c.node_type = $node_type,
-            c.domain = $domain,
-            c.description = $description,
-            c.metadata = $metadata,
-            c.created_at = datetime()
+        SET c.name = $name, c.domain = $domain, c.metadata = $metadata, c.created_at = datetime()
         RETURN c
         """
-        result = await self.execute_write(query, {
-            "id": concept_id,
-            "name": name,
-            "node_type": node_type,
-            "domain": domain,
-            "description": description,
-            "metadata": str(metadata or {}),
-        })
+        result = await self.execute_write(query, {"id": concept_id, "name": name, "domain": domain, "metadata": str(metadata or {})})
         return result[0] if result else {}
 
-    async def create_relationship(
-        self,
-        source_id: str,
-        target_id: str,
-        edge_type: str,
-        weight: float = 1.0,
-        label: str = "",
-    ) -> dict:
-        """Create a relationship between two concept nodes."""
+    async def create_source_node(self, source_id: str, title: str, source_type: str, url: str = "", metadata: dict = None) -> dict:
+        """Create a Source node."""
+        query = """
+        MERGE (s:Source {id: $id})
+        SET s.title = $title, s.type = $type, s.url = $url, s.metadata = $metadata, s.created_at = datetime()
+        RETURN s
+        """
+        result = await self.execute_write(query, {"id": source_id, "title": title, "type": source_type, "url": url, "metadata": str(metadata or {})})
+        return result[0] if result else {}
+
+    async def create_domain_node(self, name: str) -> dict:
+        """Create a Domain node."""
+        query = """
+        MERGE (d:Domain {name: $name})
+        SET d.created_at = coalesce(d.created_at, datetime())
+        RETURN d
+        """
+        result = await self.execute_write(query, {"name": name})
+        return result[0] if result else {}
+
+    async def create_entity_node(self, entity_id: str, name: str, label: str) -> dict:
+        """Create an Entity node."""
+        query = """
+        MERGE (e:Entity {id: $id})
+        SET e.name = $name, e.label = $label, e.created_at = datetime()
+        RETURN e
+        """
+        result = await self.execute_write(query, {"id": entity_id, "name": name, "label": label})
+        return result[0] if result else {}
+
+    async def create_relationship(self, source_id: str, target_id: str, edge_type: str, weight: float = 1.0, properties: dict = None) -> dict:
+        """Create a relationship between two nodes of any type by ID."""
+        # Using MATCH on any node type since IDs are globally unique constraints
         query = f"""
-        MATCH (a:Concept {{id: $source_id}})
-        MATCH (b:Concept {{id: $target_id}})
-        MERGE (a)-[r:{edge_type.upper()} {{source_id: $source_id, target_id: $target_id}}]->(b)
-        SET r.weight = $weight,
-            r.label = $label,
-            r.created_at = datetime()
+        MATCH (a {{id: $source_id}})
+        MATCH (b {{id: $target_id}})
+        MERGE (a)-[r:{edge_type.upper()}]->(b)
+        SET r.weight = $weight, r.properties = $properties, r.created_at = coalesce(r.created_at, datetime())
         RETURN a, r, b
         """
         result = await self.execute_write(query, {
             "source_id": source_id,
             "target_id": target_id,
             "weight": weight,
-            "label": label,
+            "properties": str(properties or {})
         })
+        return result[0] if result else {}
+        
+    async def create_domain_relationship(self, node_id: str, domain_name: str) -> dict:
+        """Create a BELONGS_TO relationship to a Domain node."""
+        query = """
+        MATCH (a {id: $node_id})
+        MATCH (d:Domain {name: $domain_name})
+        MERGE (a)-[r:BELONGS_TO]->(d)
+        RETURN a, r, d
+        """
+        result = await self.execute_write(query, {"node_id": node_id, "domain_name": domain_name})
         return result[0] if result else {}
 
     async def get_all_nodes(self, limit: int = 500) -> list[dict]:

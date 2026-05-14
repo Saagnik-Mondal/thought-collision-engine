@@ -1,25 +1,39 @@
 <![CDATA["""
-Shortest Paths — Find shortest paths between concept nodes.
+Graph Algorithms — Shortest Paths
+Calculates the structural distance between two nodes. High distance = high novelty.
 """
+from loguru import logger
 from core.neo4j_client import Neo4jClient
 
-class ShortestPaths:
-    name = "shortest_paths"
+class ShortestPathAlgorithm:
+    async def get_distance(self, neo4j: Neo4jClient, source_id: str, target_id: str, max_depth: int = 6) -> int:
+        """
+        Calculate structural distance.
+        Returns distance. If no path within max_depth, returns max_depth (high novelty).
+        """
+        query = """
+        MATCH path = shortestPath(
+            (a:Concept {id: $source_id})-[*1..$max_depth]-(b:Concept {id: $target_id})
+        )
+        RETURN length(path) AS distance
+        """
+        result = await neo4j.execute_read(query, {
+            "source_id": source_id, 
+            "target_id": target_id, 
+            "max_depth": max_depth
+        })
+        
+        if not result:
+            return max_depth  # No path found = maximum structural novelty
+        
+        return result[0]["distance"]
 
-    async def find(self, neo4j: Neo4jClient, source_id: str, target_id: str) -> dict:
-        """Find shortest path between two concepts."""
-        result = await neo4j.get_shortest_path(source_id, target_id)
-        if result:
-            return {"path": result[0].get("path_nodes", []), "distance": result[0].get("distance", -1)}
-        return {"path": [], "distance": -1}
-
-    async def all_pairs_distances(self, neo4j: Neo4jClient, node_ids: list[str]) -> dict:
-        """Compute pairwise distances for a set of nodes."""
-        distances = {}
-        for i, id_a in enumerate(node_ids):
-            for id_b in node_ids[i+1:]:
-                result = await neo4j.get_shortest_path(id_a, id_b)
-                dist = result[0].get("distance", -1) if result else -1
-                distances[(id_a, id_b)] = dist
-        return distances
+    async def score_novelty(self, neo4j: Neo4jClient, source_id: str, target_id: str, max_depth: int = 6) -> float:
+        """Convert structural distance into a normalized novelty score (0.0 to 1.0)."""
+        dist = await self.get_distance(neo4j, source_id, target_id, max_depth)
+        # Distance 1 (direct neighbor) = 0.0 novelty
+        # Distance >= max_depth = 1.0 novelty
+        if dist <= 1:
+            return 0.0
+        return min(1.0, dist / max_depth)
 ]]>

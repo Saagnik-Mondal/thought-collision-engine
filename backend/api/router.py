@@ -6,10 +6,11 @@ Aggregates all route modules into a single router.
 
 from fastapi import APIRouter
 
-from api.routes import ingest, concepts, collisions, hypotheses, graph, experiments, plugins
+from api.routes import ingest, concepts, collisions, hypotheses, graph, experiments, plugins, websocket
 
 api_router = APIRouter()
 
+api_router.include_router(websocket.router, tags=["Websocket"])
 api_router.include_router(ingest.router, prefix="/ingest", tags=["Ingestion"])
 api_router.include_router(concepts.router, prefix="/concepts", tags=["Concepts"])
 api_router.include_router(collisions.router, prefix="/collisions", tags=["Collisions"])
