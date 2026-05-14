@@ -1,0 +1,2 @@
+<![CDATA["""API routes package."""
+]]>

@@ -1,0 +1,1 @@
+"""Collision discovery algorithms package."""
